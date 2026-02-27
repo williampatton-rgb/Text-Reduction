@@ -3,7 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Article Simplifier for Students (Gemini Powered)</title>
+    <title>Article Simplifier for Students</title>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -51,6 +55,30 @@
         .api-container input[type="password"], .api-container input[type="text"] {
             flex-grow: 1;
         }
+        .file-upload-container {
+            background-color: #ecf0f1;
+            border: 2px dashed #bdc3c7;
+            padding: 15px;
+            text-align: center;
+            border-radius: 4px;
+            margin-bottom: 15px;
+        }
+        input[type="file"] {
+            display: none;
+        }
+        .file-label {
+            background-color: #95a5a6;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            display: inline-block;
+            font-weight: normal;
+            transition: background 0.3s;
+        }
+        .file-label:hover {
+            background-color: #7f8c8d;
+        }
         button {
             background-color: #3498db;
             color: white;
@@ -72,6 +100,7 @@
             display: flex;
             gap: 10px;
             margin-top: 10px;
+            flex-wrap: wrap;
         }
         .btn-secondary {
             background-color: #2ecc71;
@@ -79,10 +108,27 @@
         .btn-secondary:hover {
             background-color: #27ae60;
         }
+        .btn-danger {
+            background-color: #e74c3c;
+            margin-left: auto;
+        }
+        .btn-danger:hover {
+            background-color: #c0392b;
+        }
         .status {
             margin-top: 10px;
             font-style: italic;
             color: #7f8c8d;
+        }
+        .error-text {
+            color: #e74c3c;
+            font-weight: bold;
+        }
+        .char-count {
+            font-size: 0.85em;
+            color: #7f8c8d;
+            text-align: right;
+            margin-top: 5px;
         }
     </style>
 </head>
@@ -94,16 +140,25 @@
         <div class="form-group">
             <label for="apiKey">Gemini API Key:</label>
             <div class="api-container">
-                <input type="password" id="apiKey" placeholder="AIzaSy...">
+                <input type="password" id="apiKey" placeholder="AIzaSy..." onchange="saveApiKey()">
                 <label style="font-weight: normal; margin: 0; display: flex; align-items: center; gap: 5px;">
                     <input type="checkbox" id="toggleKey" onclick="toggleApiKeyVisibility()"> Show
                 </label>
             </div>
+            <div style="font-size: 0.8em; color: #7f8c8d; margin-top: 5px;">Your key is saved locally in your browser.</div>
         </div>
 
         <div class="form-group">
-            <label for="inputText">Paste Article Here:</label>
-            <textarea id="inputText" placeholder="Paste the text you want to simplify..."></textarea>
+            <label>Provide Article Content:</label>
+            
+            <div class="file-upload-container">
+                <span id="fileStatus" style="display: block; margin-bottom: 10px; font-size: 0.9em; color: #34495e;">Upload a .docx or .pdf file to automatically extract the text.</span>
+                <label for="fileInput" class="file-label">Choose File</label>
+                <input type="file" id="fileInput" accept=".pdf,.docx" onchange="handleFileUpload(event)">
+            </div>
+
+            <textarea id="inputText" placeholder="Paste the text you want to simplify, or upload a file above..." oninput="updateCharCount()"></textarea>
+            <div id="charCount" class="char-count">0 / 100,000 characters</div>
         </div>
 
         <button id="simplifyBtn" onclick="processText()">Simplify Article</button>
@@ -117,20 +172,96 @@
         <div class="actions">
             <button class="btn-secondary" id="copyBtn" onclick="copyText()" disabled>Copy Text</button>
             <button class="btn-secondary" id="downloadBtn" onclick="downloadWord()" disabled>Download as Word (.doc)</button>
+            <button class="btn-danger" id="clearBtn" onclick="clearAll()">Clear All</button>
         </div>
     </div>
 
     <script>
-        // The specific prompt provided by the user
+        // Setup PDF.js worker
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
         const systemPrompt = `Please simplify this article in Bullet Points. Do not add pictures. Do not add text. Do not add any additional information. Do not delete any information. Only simplify and shorten the language. Make it as short and simple as you can while retaining all essential facts. Simplify it so that a 5th grade non-native speaker could understand it.`;
+        const MAX_CHARS = 100000;
+
+        window.onload = function() {
+            const savedKey = localStorage.getItem("geminiApiKey");
+            if (savedKey) {
+                document.getElementById("apiKey").value = savedKey;
+            }
+        };
+
+        function saveApiKey() {
+            const apiKey = document.getElementById("apiKey").value.trim();
+            if (apiKey) localStorage.setItem("geminiApiKey", apiKey);
+            else localStorage.removeItem("geminiApiKey");
+        }
 
         function toggleApiKeyVisibility() {
             const apiKeyInput = document.getElementById("apiKey");
-            if (apiKeyInput.type === "password") {
-                apiKeyInput.type = "text";
-            } else {
-                apiKeyInput.type = "password";
+            apiKeyInput.type = apiKeyInput.type === "password" ? "text" : "password";
+        }
+
+        function updateCharCount() {
+            const inputText = document.getElementById("inputText").value;
+            const countDisplay = document.getElementById("charCount");
+            countDisplay.innerText = `${inputText.length.toLocaleString()} / ${MAX_CHARS.toLocaleString()} characters`;
+            countDisplay.style.color = inputText.length > MAX_CHARS ? "#e74c3c" : "#7f8c8d";
+        }
+
+        // --- FILE UPLOAD HANDLING ---
+        async function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const fileStatus = document.getElementById('fileStatus');
+            const inputText = document.getElementById('inputText');
+            
+            fileStatus.innerText = `Extracting text from ${file.name}... Please wait.`;
+            fileStatus.style.color = "#2980b9";
+
+            try {
+                const arrayBuffer = await file.arrayBuffer();
+                let extractedText = "";
+
+                if (file.name.toLowerCase().endsWith('.docx')) {
+                    const result = await mammoth.extractRawText({ arrayBuffer: arrayBuffer });
+                    extractedText = result.value;
+                } 
+                else if (file.name.toLowerCase().endsWith('.pdf')) {
+                    const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                    for (let i = 1; i <= pdf.numPages; i++) {
+                        const page = await pdf.getPage(i);
+                        const textContent = await page.getTextContent();
+                        const pageText = textContent.items.map(item => item.str).join(' ');
+                        extractedText += pageText + '\n\n';
+                    }
+                } else {
+                    throw new Error("Unsupported file type.");
+                }
+
+                if (!extractedText.trim()) {
+                    throw new Error("Could not find any readable text in this document.");
+                }
+
+                // Append or replace the text in the input box
+                if (inputText.value.trim() !== "") {
+                    inputText.value += "\n\n" + extractedText;
+                } else {
+                    inputText.value = extractedText;
+                }
+
+                updateCharCount();
+                fileStatus.innerText = `Success! Text extracted from ${file.name}.`;
+                fileStatus.style.color = "#27ae60";
+
+            } catch (error) {
+                console.error(error);
+                fileStatus.innerText = `Error extracting text: ${error.message}`;
+                fileStatus.style.color = "#e74c3c";
             }
+            
+            // Reset the file input so the same file can be uploaded again if cleared
+            event.target.value = ''; 
         }
 
         async function processText() {
@@ -139,61 +270,46 @@
             const statusText = document.getElementById("statusText");
             const simplifyBtn = document.getElementById("simplifyBtn");
 
-            if (!apiKey) {
-                alert("Please enter your Gemini API Key.");
-                return;
-            }
-            if (!inputText) {
-                alert("Please paste an article to simplify.");
-                return;
-            }
+            if (!apiKey) return alert("Please enter your Gemini API Key.");
+            if (!inputText) return alert("Please paste an article or upload a file.");
+            if (inputText.length > MAX_CHARS) return alert(`This article is too long! Please trim it to under ${MAX_CHARS.toLocaleString()} characters.`);
 
+            saveApiKey();
+
+            statusText.className = "status"; 
             statusText.innerText = "Processing... this may take a few seconds.";
             simplifyBtn.disabled = true;
 
             try {
-                // Using the Gemini 2.5 Flash endpoint
                 const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
-                
-                // Formatted specifically for the Gemini REST API
                 const requestBody = {
-                    system_instruction: {
-                        parts: [
-                            { text: systemPrompt }
-                        ]
-                    },
-                    contents: [
-                        {
-                            parts: [
-                                { text: `Here is the article:\n\n${inputText}` }
-                            ]
-                        }
-                    ],
-                    generationConfig: {
-                        temperature: 0.3 // Low temperature for factual, consistent formatting
-                    }
+                    system_instruction: { parts: [{ text: systemPrompt }] },
+                    contents: [{ parts: [{ text: `Here is the article:\n\n${inputText}` }] }],
+                    generationConfig: { temperature: 0.3 }
                 };
 
                 const response = await fetch(url, {
                     method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
+                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(requestBody)
                 });
 
                 if (!response.ok) {
                     const errorData = await response.json();
-                    throw new Error(`API Error: ${response.status} - ${errorData.error?.message || response.statusText}`);
+                    let errorMessage = errorData.error?.message || response.statusText;
+                    if (response.status === 400) errorMessage = "Bad Request: The text might be too complex.";
+                    if (response.status === 401 || response.status === 403) errorMessage = "Invalid API Key.";
+                    if (response.status === 429) errorMessage = "Too many requests! You hit your API limit.";
+                    if (response.status === 500) errorMessage = "Gemini's servers are down.";
+                    throw new Error(errorMessage);
                 }
 
                 const data = await response.json();
-                
-                // Navigate Gemini's specific response structure to extract the text
-                let rawOutput = data.candidates[0].content.parts[0].text;
+                if (!data.candidates || data.candidates.length === 0 || !data.candidates[0].content) {
+                    throw new Error("Gemini refused to process this text. It may have triggered a safety filter.");
+                }
 
-                // Enforce the 1 blank line between bullet points rule
-                // Split by newlines, remove empty spaces, and join with exactly double newlines
+                let rawOutput = data.candidates[0].content.parts[0].text;
                 const formattedOutput = rawOutput
                     .split('\n')
                     .map(line => line.trim())
@@ -203,14 +319,13 @@
                 document.getElementById("outputText").value = formattedOutput;
                 statusText.innerText = "Done!";
                 
-                // Enable action buttons
                 document.getElementById("copyBtn").disabled = false;
                 document.getElementById("downloadBtn").disabled = false;
 
             } catch (error) {
                 console.error(error);
-                statusText.innerText = "";
-                alert("An error occurred: " + error.message);
+                statusText.className = "status error-text";
+                statusText.innerText = "Error: " + error.message;
             } finally {
                 simplifyBtn.disabled = false;
             }
@@ -219,7 +334,7 @@
         function copyText() {
             const outputText = document.getElementById("outputText");
             outputText.select();
-            outputText.setSelectionRange(0, 99999); // For mobile devices
+            outputText.setSelectionRange(0, 99999);
             navigator.clipboard.writeText(outputText.value).then(() => {
                 alert("Copied to clipboard!");
             }).catch(err => {
@@ -229,20 +344,10 @@
 
         function downloadWord() {
             const text = document.getElementById("outputText").value;
-            
-            // Format the text into basic HTML so Word recognizes the spacing and bullet points
-            const htmlContent = text.split('\n\n').map(paragraph => {
-                return `<p style="margin-bottom: 12pt;">${paragraph}</p>`;
-            }).join('');
-
+            const htmlContent = text.split('\n\n').map(paragraph => `<p style="margin-bottom: 12pt;">${paragraph}</p>`).join('');
             const header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Simplified Article</title></head><body>";
             const footer = "</body></html>";
-            const fullHtml = header + htmlContent + footer;
-
-            // Create a blob with the Word document MIME type
-            const blob = new Blob(['\ufeff', fullHtml], {
-                type: 'application/msword'
-            });
+            const blob = new Blob(['\ufeff', header + htmlContent + footer], { type: 'application/msword' });
             
             const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
@@ -251,6 +356,19 @@
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
+        }
+
+        function clearAll() {
+            if (confirm("Are you sure you want to clear the text areas?")) {
+                document.getElementById("inputText").value = "";
+                document.getElementById("outputText").value = "";
+                document.getElementById("statusText").innerText = "";
+                document.getElementById("fileStatus").innerText = "Upload a .docx or .pdf file to automatically extract the text.";
+                document.getElementById("fileStatus").style.color = "#34495e";
+                document.getElementById("copyBtn").disabled = true;
+                document.getElementById("downloadBtn").disabled = true;
+                updateCharCount();
+            }
         }
     </script>
 </body>
