@@ -47,6 +47,24 @@
             resize: vertical;
             height: 150px;
         }
+        /* Upgraded output box to support rich text (bolding) */
+        .output-box {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            box-sizing: border-box;
+            font-family: inherit;
+            min-height: 150px;
+            background-color: #fcfcfc;
+            overflow-y: auto;
+        }
+        .output-box:empty:before {
+            content: attr(data-placeholder);
+            color: #999;
+            pointer-events: none;
+            display: block; /* For Firefox */
+        }
         .api-container {
             display: flex;
             align-items: center;
@@ -150,13 +168,11 @@
 
         <div class="form-group">
             <label>Provide Article Content:</label>
-            
             <div class="file-upload-container">
                 <span id="fileStatus" style="display: block; margin-bottom: 10px; font-size: 0.9em; color: #34495e;">Upload a .docx or .pdf file to automatically extract the text.</span>
                 <label for="fileInput" class="file-label">Choose File</label>
                 <input type="file" id="fileInput" accept=".pdf,.docx" onchange="handleFileUpload(event)">
             </div>
-
             <textarea id="inputText" placeholder="Paste the text you want to simplify, or upload a file above..." oninput="updateCharCount()"></textarea>
             <div id="charCount" class="char-count">0 / 100,000 characters</div>
         </div>
@@ -166,7 +182,7 @@
 
         <div class="form-group" style="margin-top: 30px;">
             <label for="outputText">Simplified Result:</label>
-            <textarea id="outputText" readonly placeholder="Your simplified bullet points will appear here..."></textarea>
+            <div id="outputText" class="output-box" contenteditable="true" data-placeholder="Your formatted bullet points will appear here..."></div>
         </div>
 
         <div class="actions">
@@ -177,10 +193,10 @@
     </div>
 
     <script>
-        // Setup PDF.js worker
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
-        const systemPrompt = `Please simplify this article in Bullet Points. Do not add pictures. Do not add text. Do not add any additional information. Do not delete any information. Only simplify and shorten the language. Make it as short and simple as you can while retaining all essential facts. Simplify it so that a 5th grade non-native speaker could understand it.`;
+        // Updated Prompt to enforce grouping under Bold Headers
+        const systemPrompt = `Please simplify this article into Bullet Points. Group the bullet points logically under short, descriptive Bold Headers (using markdown formatting like **Header**). Do not add pictures. Do not add any text other than the headers and bullet points. Do not add any additional information. Do not delete any information. Only simplify and shorten the language. Make it as short and simple as you can while retaining all essential facts. Simplify it so that a 5th grade non-native speaker could understand it.`;
         const MAX_CHARS = 100000;
 
         window.onload = function() {
@@ -208,7 +224,6 @@
             countDisplay.style.color = inputText.length > MAX_CHARS ? "#e74c3c" : "#7f8c8d";
         }
 
-        // --- FILE UPLOAD HANDLING ---
         async function handleFileUpload(event) {
             const file = event.target.files[0];
             if (!file) return;
@@ -239,16 +254,10 @@
                     throw new Error("Unsupported file type.");
                 }
 
-                if (!extractedText.trim()) {
-                    throw new Error("Could not find any readable text in this document.");
-                }
+                if (!extractedText.trim()) throw new Error("Could not find any readable text in this document.");
 
-                // Append or replace the text in the input box
-                if (inputText.value.trim() !== "") {
-                    inputText.value += "\n\n" + extractedText;
-                } else {
-                    inputText.value = extractedText;
-                }
+                if (inputText.value.trim() !== "") inputText.value += "\n\n" + extractedText;
+                else inputText.value = extractedText;
 
                 updateCharCount();
                 fileStatus.innerText = `Success! Text extracted from ${file.name}.`;
@@ -259,8 +268,6 @@
                 fileStatus.innerText = `Error extracting text: ${error.message}`;
                 fileStatus.style.color = "#e74c3c";
             }
-            
-            // Reset the file input so the same file can be uploaded again if cleared
             event.target.value = ''; 
         }
 
@@ -310,13 +317,22 @@
                 }
 
                 let rawOutput = data.candidates[0].content.parts[0].text;
+                
+                // NEW FORMATTING LOGIC:
+                // Converts AI's **Markdown** into HTML <strong> tags
+                // Wraps each line in a <p> tag with a 12pt bottom margin to strictly enforce the "1 blank line" rule
                 const formattedOutput = rawOutput
                     .split('\n')
                     .map(line => line.trim())
                     .filter(line => line.length > 0)
-                    .join('\n\n');
+                    .map(line => {
+                        let htmlLine = line.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+                        return `<p style="margin-bottom: 12pt; margin-top: 0;">${htmlLine}</p>`;
+                    })
+                    .join('');
 
-                document.getElementById("outputText").value = formattedOutput;
+                // Inject the rich text into our new div
+                document.getElementById("outputText").innerHTML = formattedOutput;
                 statusText.innerText = "Done!";
                 
                 document.getElementById("copyBtn").disabled = false;
@@ -332,21 +348,30 @@
         }
 
         function copyText() {
-            const outputText = document.getElementById("outputText");
-            outputText.select();
-            outputText.setSelectionRange(0, 99999);
-            navigator.clipboard.writeText(outputText.value).then(() => {
-                alert("Copied to clipboard!");
-            }).catch(err => {
+            // Updated copy logic to preserve the formatting (bolding/spacing) when pasting to Word/Google Docs
+            const outputBox = document.getElementById("outputText");
+            const range = document.createRange();
+            range.selectNodeContents(outputBox);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+
+            try {
+                document.execCommand('copy');
+                alert("Copied to clipboard with formatting!");
+            } catch (err) {
                 alert("Failed to copy text: " + err);
-            });
+            }
+            selection.removeAllRanges(); // Deselect text after copying
         }
 
         function downloadWord() {
-            const text = document.getElementById("outputText").value;
-            const htmlContent = text.split('\n\n').map(paragraph => `<p style="margin-bottom: 12pt;">${paragraph}</p>`).join('');
+            // Grabs the pre-formatted HTML (with strong tags) directly from the div
+            const htmlContent = document.getElementById("outputText").innerHTML;
+            
             const header = "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Simplified Article</title></head><body>";
             const footer = "</body></html>";
+            
             const blob = new Blob(['\ufeff', header + htmlContent + footer], { type: 'application/msword' });
             
             const url = URL.createObjectURL(blob);
@@ -361,7 +386,7 @@
         function clearAll() {
             if (confirm("Are you sure you want to clear the text areas?")) {
                 document.getElementById("inputText").value = "";
-                document.getElementById("outputText").value = "";
+                document.getElementById("outputText").innerHTML = ""; // Clears the div
                 document.getElementById("statusText").innerText = "";
                 document.getElementById("fileStatus").innerText = "Upload a .docx or .pdf file to automatically extract the text.";
                 document.getElementById("fileStatus").style.color = "#34495e";
